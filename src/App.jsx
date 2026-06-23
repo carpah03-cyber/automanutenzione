@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { supabase } from "./supabaseClient";
 import {
   CheckCircle2,
@@ -172,6 +172,15 @@ export default function App() {
           <Settings className="w-4 h-4" />
           Impostazioni
         </button>
+        <button
+          onClick={() => setView("storico")}
+          className={`flex items-center gap-1.5 text-sm font-medium px-3 py-1.5 rounded-full transition-colors ${
+            view === "storico" ? "bg-blue-600 text-white" : "text-slate-400 hover:text-white"
+          }`}
+        >
+          <Clock className="w-4 h-4" />
+          Storico
+        </button>
       </div>
 
       {view === "operatore" && (
@@ -188,6 +197,7 @@ export default function App() {
       {view === "impostazioni" && (
         <SettingsView machines={machines} tasks={tasks} onChange={loadData} />
       )}
+      {view === "storico" && <HistoryView machines={machines} tasks={tasks} />}
     </div>
   );
 }
@@ -504,6 +514,180 @@ function OperatorView({ machines, tasks, completions, onConfirm }) {
 }
 
 // ============ SUPERVISOR VIEW ============
+// ============ HISTORY VIEW ============
+function HistoryView({ machines, tasks }) {
+  const [completions, setCompletions] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [selectedCell, setSelectedCell] = useState(null);
+
+  const days = useMemo(() => {
+    const arr = [];
+    const today = new Date();
+    for (let i = 29; i >= 0; i--) {
+      const d = new Date();
+      d.setDate(today.getDate() - i);
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      arr.push({ date: `${y}-${m}-${day}`, label: `${day}/${m}`, jsDate: new Date(d.getFullYear(), d.getMonth(), d.getDate()) });
+    }
+    return arr;
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      setLoading(true);
+      const earliest = days[0].date;
+      const { data } = await supabase
+        .from("task_completions")
+        .select("*")
+        .gte("completion_date", earliest)
+        .order("completion_date", { ascending: true });
+      if (!mounted) return;
+      setCompletions(data || []);
+      setLoading(false);
+    })();
+    return () => (mounted = false);
+  }, [days]);
+
+  function isDueOnDate(task, jsDate) {
+    if (!task || !task.frequency) return true;
+    const day = jsDate.getDay();
+    const date = jsDate.getDate();
+    if (task.frequency === "daily") return true;
+    if (task.frequency === "weekly") return day === 1;
+    if (task.frequency === "monthly") return date === 1;
+    return true;
+  }
+
+  const compMap = useMemo(() => {
+    const m = {};
+    (completions || []).forEach((c) => {
+      const key = `${c.task_id}|${c.completion_date}`;
+      if (!m[key]) m[key] = [];
+      m[key].push(c);
+    });
+    return m;
+  }, [completions]);
+
+  function cellInfo(machine, day) {
+    const due = tasks.filter((t) => t.machine_id === machine.id && isDueOnDate(t, day.jsDate));
+    if (due.length === 0) return { due: [], completed: [] };
+    const completed = due.filter((t) => !!compMap[`${t.id}|${day.date}`]);
+    return { due, completed };
+  }
+
+  function onCellClick(machine, day) {
+    const { due } = cellInfo(machine, day);
+    const details = due.map((t) => ({ task: t, completions: compMap[`${t.id}|${day.date}`] || [] }));
+    setSelectedCell({ machine, day, details });
+  }
+
+  return (
+    <div className="flex flex-col">
+      <header className="bg-slate-900 text-white px-6 py-5">
+        <div className="flex items-center gap-3">
+          <Clock className="w-7 h-7 text-blue-400" />
+          <h1 className="text-xl font-bold">Storico Automanutenzioni</h1>
+        </div>
+      </header>
+
+      <main className="flex-1 px-4 py-6 max-w-full mx-auto w-full">
+        {loading ? (
+          <div className="min-h-[200px] flex items-center justify-center">
+            <Loader2 className="w-8 h-8 text-blue-500 animate-spin" />
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-max w-full border-collapse">
+              <thead>
+                <tr>
+                  <th className="sticky left-0 bg-white z-20 border-b border-slate-200 text-left px-4 py-2">Macchina</th>
+                  {days.map((d) => (
+                    <th key={d.date} className="border-b border-slate-200 px-3 py-2 text-center text-xs text-slate-600">
+                      {d.label}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {machines.map((m) => (
+                  <tr key={m.id} className="align-top">
+                    <td className="sticky left-0 bg-white z-10 border-r border-slate-200 px-4 py-2 font-medium text-slate-800 w-48">{m.name}</td>
+                    {days.map((d) => {
+                      const info = cellInfo(m, d);
+                      const dueCount = info.due.length;
+                      const compCount = info.completed.length;
+                      let cellClass = "bg-slate-100";
+                      if (dueCount === 0) cellClass = "bg-slate-100";
+                      else if (compCount === 0) cellClass = "bg-red-500 text-white";
+                      else if (compCount === dueCount) cellClass = "bg-green-500 text-white";
+                      else cellClass = "bg-yellow-500 text-white";
+
+                      return (
+                        <td
+                          key={d.date}
+                          onClick={() => onCellClick(m, d)}
+                          title={`Dovute: ${dueCount} — Completate: ${compCount}`}
+                          className={`px-2 py-2 text-center align-top cursor-pointer border-r border-slate-100 ${cellClass}`}
+                        >
+                          {dueCount === 0 ? "" : <div className="text-xs font-semibold">{compCount}/{dueCount}</div>}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </main>
+
+      {selectedCell && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl w-full max-w-2xl p-6 max-h-[80vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <p className="font-bold">{selectedCell.machine.name}</p>
+                <p className="text-sm text-slate-500">{selectedCell.day.label} — {selectedCell.day.date}</p>
+              </div>
+              <button onClick={() => setSelectedCell(null)} className="text-slate-500 hover:text-slate-700">Chiudi</button>
+            </div>
+            <div className="space-y-3">
+              {selectedCell.details.length === 0 ? (
+                <p className="text-slate-400">Nessuna attività dovuta.</p>
+              ) : (
+                selectedCell.details.map((d) => (
+                  <div key={d.task.id} className="border rounded-lg p-3">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="font-medium">{d.task.title}</p>
+                        <p className="text-sm text-slate-500">{d.task.description}</p>
+                      </div>
+                      <div className="text-right text-sm">
+                        {d.completions.length === 0 ? (
+                          <span className="text-red-500 font-semibold">Non completata</span>
+                        ) : (
+                          d.completions.map((c) => (
+                            <div key={c.id} className="text-sm text-slate-700">
+                              <div>{c.operator_name || "-"}</div>
+                              <div className="text-xs text-slate-500">{c.completed_at ? new Date(c.completed_at).toLocaleTimeString("it-IT", {hour: '2-digit', minute: '2-digit'}) : c.completion_date}</div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 function SupervisorView({ machines, tasks, completions }) {
   const [selectedMachine, setSelectedMachine] = useState(null);
   const today = new Date();
